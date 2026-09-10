@@ -1,0 +1,447 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>TyG Partos</title>
+
+  <link rel="apple-touch-icon" href="icon-180.png" />
+  <link rel="icon" href="icon-192.png" />
+  <link rel="manifest" href="manifest.json" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="TyG Partos" />
+  <meta name="theme-color" content="#2F3D28" />
+
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Mono:wght@500;600&family=Work+Sans:wght@400;500;600&display=swap');
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: 'Work Sans', -apple-system, sans-serif; -webkit-tap-highlight-color: transparent; }
+    #error-box {
+      display: none; position: fixed; inset: 0; background: #fff; z-index: 9999;
+      padding: 24px; font-family: -apple-system, sans-serif; overflow: auto;
+    }
+    #error-box h2 { color: #A6491F; }
+    #error-box pre { background: #EDE7D6; padding: 12px; border-radius: 8px; white-space: pre-wrap; word-break: break-word; font-size: 13px; }
+  </style>
+
+  <script type="importmap">
+  {
+    "imports": {
+      "react": "https://esm.sh/react@18.3.1",
+      "react/jsx-runtime": "https://esm.sh/react@18.3.1/jsx-runtime",
+      "react-dom/client": "https://esm.sh/react-dom@18.3.1/client",
+      "firebase/app": "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js",
+      "firebase/firestore": "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js"
+    }
+  }
+  </script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js" crossorigin="anonymous"></script>
+</head>
+<body>
+  <div id="root"></div>
+
+  <div id="error-box">
+    <h2>Ocurrió un error</h2>
+    <p>Sacale una captura a esto y mandásela a Claude para corregirlo:</p>
+    <pre id="error-text"></pre>
+  </div>
+
+  <script>
+    window.addEventListener("error", (e) => {
+      document.getElementById("error-box").style.display = "block";
+      var texto = (e.error && e.error.stack) || e.message || String(e);
+      document.getElementById("error-text").textContent = texto;
+    });
+    window.addEventListener("unhandledrejection", (e) => {
+      document.getElementById("error-box").style.display = "block";
+      var r = e.reason;
+      document.getElementById("error-text").textContent = (r && (r.stack || r.message)) || String(r);
+    });
+    if ("serviceWorker" in navigator) {
+      window.addEventListener("load", () => {
+        navigator.serviceWorker.register("sw.js").catch(() => {});
+      });
+    }
+  </script>
+
+  <script type="text/babel" data-type="module" data-presets="react">
+    import React, { useState, useEffect, useRef } from "react";
+    import { createRoot } from "react-dom/client";
+    import { initializeApp } from "firebase/app";
+    import { getFirestore, collection, doc, getDoc, getDocs, setDoc, deleteDoc } from "firebase/firestore";
+
+    // Mismo proyecto de Firebase que ReproBovina T&G — colecciones propias con prefijo "partos_"
+    // para no tocar los datos de esa app.
+    const firebaseConfig = {
+      apiKey: "AIzaSyDeBLhH4lIASyLxlMg_oSwM_EZX7wzOg94",
+      authDomain: "reprobovina-tyg.firebaseapp.com",
+      projectId: "reprobovina-tyg",
+      storageBucket: "reprobovina-tyg.firebasestorage.app",
+      messagingSenderId: "162502425864",
+      appId: "1:162502425864:web:49fecac926675a731c00bd",
+    };
+    const fbApp = initializeApp(firebaseConfig);
+    const db = getFirestore(fbApp);
+
+    const DB_NAME = "partos_local";
+    const DB_VERSION = 1;
+    const COLECCIONES = ["registros", "campos"];
+
+    const PUESTERO_KEY = "partos_puestero";
+    function obtenerPuesteroActual() { try { return localStorage.getItem(PUESTERO_KEY) || ""; } catch (e) { return ""; } }
+    function guardarPuesteroActual(n) { try { localStorage.setItem(PUESTERO_KEY, n); } catch (e) {} }
+    function borrarPuesteroActual() { try { localStorage.removeItem(PUESTERO_KEY); } catch (e) {} }
+
+    function abrirDB() {
+      return new Promise((resolve, reject) => {
+        const req = indexedDB.open(DB_NAME, DB_VERSION);
+        req.onupgradeneeded = () => {
+          const dbase = req.result;
+          COLECCIONES.forEach((nombre) => {
+            if (!dbase.objectStoreNames.contains(nombre)) dbase.createObjectStore(nombre, { keyPath: "id" });
+          });
+        };
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error);
+      });
+    }
+    async function idbGetAll(col) {
+      const dbase = await abrirDB();
+      return new Promise((resolve, reject) => {
+        const tx = dbase.transaction(col, "readonly");
+        const req = tx.objectStore(col).getAll();
+        req.onsuccess = () => resolve(req.result || []);
+        req.onerror = () => reject(req.error);
+      });
+    }
+    async function idbPut(col, registro) {
+      const dbase = await abrirDB();
+      return new Promise((resolve, reject) => {
+        const tx = dbase.transaction(col, "readwrite");
+        tx.objectStore(col).put(registro);
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+      });
+    }
+    async function idbDelete(col, id) {
+      const dbase = await abrirDB();
+      return new Promise((resolve, reject) => {
+        const tx = dbase.transaction(col, "readwrite");
+        tx.objectStore(col).delete(id);
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+      });
+    }
+    function conTimeout(promesa, ms = 6000) {
+      return Promise.race([promesa, new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), ms))]);
+    }
+    // Último en guardar gana (registros simples, sin listas anidadas — no hace falta fusión compleja)
+    async function guardarEnColeccion(col, registro) {
+      const conFecha = { ...registro, updatedAt: Date.now() };
+      await idbPut(col, conFecha);
+      if (navigator.onLine) {
+        try { await conTimeout(setDoc(doc(db, "partos_" + col, conFecha.id), conFecha)); } catch (e) {}
+      }
+      return conFecha;
+    }
+    async function borrarDeColeccion(col, id) {
+      await idbDelete(col, id);
+      if (navigator.onLine) {
+        try { await conTimeout(deleteDoc(doc(db, "partos_" + col, id))); } catch (e) {}
+      }
+    }
+    async function sincronizar(col) {
+      if (!navigator.onLine) return;
+      try {
+        const locales = await idbGetAll(col);
+        const localesPorId = Object.fromEntries(locales.map((r) => [r.id, r]));
+        const snap = await conTimeout(getDocs(collection(db, "partos_" + col)));
+        const remotos = snap.docs.map((d) => d.data());
+        const remotosPorId = Object.fromEntries(remotos.map((r) => [r.id, r]));
+        const todosIds = new Set([...Object.keys(localesPorId), ...Object.keys(remotosPorId)]);
+        for (const id of todosIds) {
+          const loc = localesPorId[id], rem = remotosPorId[id];
+          if (loc && !rem) setDoc(doc(db, "partos_" + col, id), loc).catch(() => {});
+          else if (rem && !loc) await idbPut(col, rem);
+          else if (loc && rem && (loc.updatedAt || 0) < (rem.updatedAt || 0)) await idbPut(col, rem);
+        }
+      } catch (e) {}
+    }
+
+    function useColeccion(nombre) {
+      const [lista, setLista] = useState([]);
+      const [estadoSync, setEstadoSync] = useState(navigator.onLine ? "sincronizando" : "offline");
+      const recargar = () => idbGetAll(nombre).then(setLista);
+      useEffect(() => {
+        recargar();
+        const sync = async () => {
+          if (!navigator.onLine) { setEstadoSync("offline"); return; }
+          setEstadoSync("sincronizando");
+          await sincronizar(nombre);
+          await recargar();
+          setEstadoSync("online");
+        };
+        sync();
+        const onOnline = () => sync();
+        const onOffline = () => setEstadoSync("offline");
+        window.addEventListener("online", onOnline);
+        window.addEventListener("offline", onOffline);
+        return () => { window.removeEventListener("online", onOnline); window.removeEventListener("offline", onOffline); };
+      }, [nombre]);
+      const guardar = async (registro) => {
+        const conId = registro.id ? registro : { ...registro, id: uid() };
+        const puestero = obtenerPuesteroActual();
+        await guardarEnColeccion(nombre, { ...conId, cargadoPor: conId.cargadoPor || puestero });
+        await recargar();
+      };
+      const borrar = async (id) => { await borrarDeColeccion(nombre, id); await recargar(); };
+      return { lista, guardar, borrar, estadoSync };
+    }
+
+    const T = {
+      pasture: "#2F3D28", pastureDk: "#22301E", tag: "#D9A62B", tagDk: "#B4841B",
+      soil: "#A6491F", paper: "#EDE7D6", card: "#FBF8F0", ink: "#24221B", inkSoft: "#5B5A4C",
+      line: "#D8D0B8", ok: "#3F6B3A",
+    };
+    function uid() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 8); }
+    function slug(s) { return s.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]+/g, "-"); }
+    function todayISO() { const d = new Date(); return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0"); }
+
+    const CAMPOS_BASE = ["Agua Sucia", "El Capricho", "Fincas Nogales", "La Charqueada", "El Albardón"];
+
+    function EstadoConexion({ estado }) {
+      const config = {
+        online: { texto: "En línea · sincronizado", color: T.ok, bg: "#DCEBDA" },
+        offline: { texto: "Sin conexión · guardado en el dispositivo", color: T.soil, bg: "#E7C9B7" },
+        sincronizando: { texto: "Sincronizando...", color: T.tagDk, bg: "#F3E6C3" },
+      }[estado] || {};
+      return (
+        <div style={{ padding: "7px 16px", background: config.bg, color: config.color, fontSize: 13, fontWeight: 600, textAlign: "center" }}>
+          {config.texto}
+        </div>
+      );
+    }
+
+    function SelectorPuestero({ onElegir }) {
+      const [nombre, setNombre] = useState("");
+      return (
+        <div style={{ minHeight: "100vh", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: 24, background: T.paper }}>
+          <div style={{ fontFamily: "Space Grotesk, sans-serif", fontWeight: 700, fontSize: 22, color: T.ink, marginBottom: 8, textAlign: "center" }}>TyG Partos</div>
+          <div style={{ fontSize: 14.5, color: T.inkSoft, marginBottom: 24, textAlign: "center", maxWidth: 300 }}>
+            ¿Cómo te llamás? Así queda registrado quién cargó cada nacimiento.
+          </div>
+          <div style={{ display: "flex", gap: 8, width: "100%", maxWidth: 320 }}>
+            <input value={nombre} onChange={(e) => setNombre(e.target.value)} placeholder="Tu nombre"
+              style={{ flex: 1, minWidth: 0, boxSizing: "border-box", padding: "12px 14px", borderRadius: 8, border: `1.5px solid ${T.line}`, fontSize: 16, background: "#fff" }} />
+            <button onClick={() => nombre.trim() && onElegir(nombre.trim())} style={{ background: T.pasture, color: "#fff", border: "none", borderRadius: 8, padding: "0 18px", fontWeight: 700, cursor: "pointer" }}>OK</button>
+          </div>
+        </div>
+      );
+    }
+
+    function App() {
+      const [puestero, setPuestero] = useState(() => obtenerPuesteroActual());
+      const { lista: campos, guardar: guardarCampoDoc, estadoSync: syncCampos } = useColeccion("campos");
+      const { lista: registrosTodos, guardar: guardarRegistro, borrar: borrarRegistro, estadoSync } = useColeccion("registros");
+
+      const nombresCampos = Array.from(new Set([...CAMPOS_BASE, ...campos.map((c) => c.nombre)]));
+      const [campo, setCampo] = useState(nombresCampos[0]);
+      const registros = registrosTodos.filter((r) => slug(r.campo || "") === slug(campo));
+
+      const [fecha, setFecha] = useState(todayISO());
+      const [rpMadre, setRpMadre] = useState("");
+      const [rpTernero, setRpTernero] = useState("");
+      const [peso, setPeso] = useState("");
+      const [toro, setToro] = useState("");
+      const [estado, setEstado] = useState("vivo");
+      const [sexo, setSexo] = useState("M");
+      const [padre, setPadre] = useState("iatf");
+      const [editandoId, setEditandoId] = useState(null);
+      const [guardando, setGuardando] = useState(false);
+      const [guardadoOk, setGuardadoOk] = useState(false);
+
+      const resetForm = () => {
+        setEditandoId(null); setFecha(todayISO()); setRpMadre(""); setRpTernero(""); setPeso(""); setToro("");
+        setEstado("vivo"); setSexo("M"); setPadre("iatf");
+      };
+
+      const cargarParaEditar = (r) => {
+        setEditandoId(r.id); setFecha(r.fecha || todayISO()); setRpMadre(r.rpMadre || ""); setRpTernero(r.rpTernero || "");
+        setPeso(r.peso != null ? String(r.peso) : ""); setToro(r.toro || ""); setEstado(r.estado || "vivo");
+        setSexo(r.sexo || "M"); setPadre(r.padre || "iatf");
+        window.scrollTo({ top: 0, behavior: "smooth" });
+      };
+
+      const agregarCampo = async () => {
+        const nombre = prompt("Nombre del nuevo campo:");
+        if (!nombre || !nombre.trim()) return;
+        await guardarCampoDoc({ id: slug(nombre.trim()), nombre: nombre.trim() });
+        setCampo(nombre.trim());
+      };
+
+      const guardar = async () => {
+        setGuardando(true);
+        try {
+          const datos = {
+            id: editandoId || uid(), campo, fecha: fecha || todayISO(), rpMadre: rpMadre.trim(), rpTernero: rpTernero.trim(),
+            estado, sexo, peso: peso ? Number(peso) : null, padre, toro: toro.trim(),
+            creado: editandoId ? (registros.find((r) => r.id === editandoId) || {}).creado || Date.now() : Date.now(),
+          };
+          await guardarRegistro(datos);
+          setGuardadoOk(true);
+          setTimeout(() => { resetForm(); setGuardadoOk(false); }, 700);
+        } catch (e) {
+          alert("No se pudo guardar. Probá de nuevo.");
+        }
+        setGuardando(false);
+      };
+
+      const borrar = async (id) => {
+        if (!window.confirm("¿Borrar este registro?")) return;
+        await borrarRegistro(id);
+        if (editandoId === id) resetForm();
+      };
+
+      const exportarCSV = () => {
+        if (registros.length === 0) { alert("No hay registros para exportar."); return; }
+        const headers = ["fecha", "campo", "rp_madre", "rp_ternero", "sexo", "estado", "peso_kg", "origen_padre", "toro", "cargado_por"];
+        const rows = registros.map((r) => [r.fecha, r.campo, r.rpMadre, r.rpTernero, r.sexo === "M" ? "macho" : "hembra", r.estado, r.peso ?? "", r.padre === "iatf" ? "IATF" : "servicio colectivo", r.toro || "", r.cargadoPor || ""]);
+        const csv = [headers, ...rows].map((row) => row.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(",")).join("\n");
+        const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url; a.download = `partos_${slug(campo)}_${todayISO()}.csv`;
+        document.body.appendChild(a); a.click(); document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      };
+
+      if (!puestero) return <SelectorPuestero onElegir={(n) => { guardarPuesteroActual(n); setPuestero(n); }} />;
+
+      const vivos = registros.filter((r) => r.estado === "vivo").length;
+      const muertos = registros.filter((r) => r.estado === "muerto").length;
+      const machos = registros.filter((r) => r.sexo === "M").length;
+      const hembras = registros.filter((r) => r.sexo === "H").length;
+      const ordenados = [...registros].sort((a, b) => (b.creado || 0) - (a.creado || 0));
+
+      return (
+        <div style={{ fontFamily: "'Work Sans',sans-serif", background: T.paper, minHeight: "100vh", color: T.ink, paddingBottom: 100 }}>
+          <EstadoConexion estado={estadoSync} />
+          <header style={{ background: T.pasture, color: T.paper, padding: "16px 16px 20px" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 10 }}>
+              <div>
+                <div style={{ fontFamily: "Space Grotesk,sans-serif", fontWeight: 700, fontSize: 18 }}>TyG Partos</div>
+                <div style={{ fontSize: 12, opacity: 0.8, marginTop: 2 }}>{puestero}</div>
+              </div>
+              <select value={campo} onChange={(e) => { if (e.target.value === "__nuevo") { agregarCampo(); } else setCampo(e.target.value); }}
+                style={{ background: "transparent", color: T.tag, border: "none", fontFamily: "Space Grotesk,sans-serif", fontWeight: 600, fontSize: 14, textAlign: "right" }}>
+                {nombresCampos.map((c) => <option key={c} value={c} style={{ color: "#000" }}>{c}</option>)}
+                <option value="__nuevo" style={{ color: "#000" }}>+ Agregar campo…</option>
+              </select>
+            </div>
+            <div style={{ marginTop: 14, background: T.tag, borderRadius: 12, padding: "14px 18px", display: "grid", gridTemplateColumns: "1fr 1fr", rowGap: 12 }}>
+              <div style={{ textAlign: "center" }}><b style={{ display: "block", fontSize: 20, color: T.pastureDk, fontFamily: "IBM Plex Mono,monospace" }}>{vivos}</b><span style={{ fontSize: 10.5, color: T.pasture }}>vivos</span></div>
+              <div style={{ textAlign: "center" }}><b style={{ display: "block", fontSize: 20, color: T.pastureDk, fontFamily: "IBM Plex Mono,monospace" }}>{muertos}</b><span style={{ fontSize: 10.5, color: T.pasture }}>muertos</span></div>
+              <div style={{ textAlign: "center" }}><b style={{ display: "block", fontSize: 20, color: T.pastureDk, fontFamily: "IBM Plex Mono,monospace" }}>{machos}</b><span style={{ fontSize: 10.5, color: T.pasture }}>machos</span></div>
+              <div style={{ textAlign: "center" }}><b style={{ display: "block", fontSize: 20, color: T.pastureDk, fontFamily: "IBM Plex Mono,monospace" }}>{hembras}</b><span style={{ fontSize: 10.5, color: T.pasture }}>hembras</span></div>
+            </div>
+          </header>
+
+          <main style={{ padding: 16, maxWidth: 480, margin: "0 auto" }}>
+            <div style={{ background: T.card, border: `1px solid ${T.line}`, borderRadius: 10, padding: 16, marginBottom: 16 }}>
+              <h2 style={{ margin: "0 0 14px", fontSize: 15, color: T.pastureDk, fontFamily: "Space Grotesk,sans-serif" }}>
+                {editandoId ? "Editar nacimiento" : "Nuevo nacimiento"}
+              </h2>
+              <div style={{ marginBottom: 14 }}>
+                <label style={{ display: "block", fontSize: 12.5, color: T.inkSoft, marginBottom: 6 }}>Fecha</label>
+                <input type="date" value={fecha} onChange={(e) => setFecha(e.target.value)} style={{ width: "100%", minWidth: 0, boxSizing: "border-box", border: `1px solid ${T.line}`, background: "#fff", borderRadius: 7, padding: "11px 12px", fontSize: 16 }} />
+              </div>
+              <div style={{ marginBottom: 14 }}>
+                <label style={{ display: "block", fontSize: 12.5, color: T.inkSoft, marginBottom: 6 }}>RP de la madre</label>
+                <input value={rpMadre} onChange={(e) => setRpMadre(e.target.value)} inputMode="numeric" placeholder="Ej: 1042" style={{ width: "100%", minWidth: 0, boxSizing: "border-box", border: `1px solid ${T.line}`, background: "#fff", borderRadius: 7, padding: "11px 12px", fontSize: 16, fontFamily: "IBM Plex Mono,monospace" }} />
+              </div>
+              <div style={{ marginBottom: 14 }}>
+                <label style={{ display: "block", fontSize: 12.5, color: T.inkSoft, marginBottom: 6 }}>Estado del ternero</label>
+                <div style={{ display: "flex", gap: 8 }}>
+                  {[["vivo", "Vivo"], ["muerto", "Muerto"]].map(([v, l]) => (
+                    <button key={v} onClick={() => setEstado(v)} style={{ flex: 1, padding: "12px 8px", borderRadius: 7, border: `1.5px solid ${T.line}`, background: estado === v ? (v === "muerto" ? T.soil : T.pasture) : "#fff", color: estado === v ? "#fff" : T.inkSoft, fontWeight: 600, fontSize: 14, cursor: "pointer" }}>{l}</button>
+                  ))}
+                </div>
+              </div>
+              <div style={{ marginBottom: 14 }}>
+                <label style={{ display: "block", fontSize: 12.5, color: T.inkSoft, marginBottom: 6 }}>Sexo</label>
+                <div style={{ display: "flex", gap: 8 }}>
+                  {[["M", "Macho"], ["H", "Hembra"]].map(([v, l]) => (
+                    <button key={v} onClick={() => setSexo(v)} style={{ flex: 1, padding: "12px 8px", borderRadius: 7, border: `1.5px solid ${T.line}`, background: sexo === v ? T.pasture : "#fff", color: sexo === v ? "#fff" : T.inkSoft, fontWeight: 600, fontSize: 14, cursor: "pointer" }}>{l}</button>
+                  ))}
+                </div>
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 14 }}>
+                <div>
+                  <label style={{ display: "block", fontSize: 12.5, color: T.inkSoft, marginBottom: 6 }}>RP del ternero</label>
+                  <input value={rpTernero} onChange={(e) => setRpTernero(e.target.value)} inputMode="numeric" placeholder="Ej: 2317" style={{ width: "100%", minWidth: 0, boxSizing: "border-box", border: `1px solid ${T.line}`, background: "#fff", borderRadius: 7, padding: "11px 12px", fontSize: 16, fontFamily: "IBM Plex Mono,monospace" }} />
+                </div>
+                <div>
+                  <label style={{ display: "block", fontSize: 12.5, color: T.inkSoft, marginBottom: 6 }}>Peso (kg)</label>
+                  <input type="number" value={peso} onChange={(e) => setPeso(e.target.value)} inputMode="decimal" step="0.5" placeholder="Ej: 35" style={{ width: "100%", minWidth: 0, boxSizing: "border-box", border: `1px solid ${T.line}`, background: "#fff", borderRadius: 7, padding: "11px 12px", fontSize: 16, fontFamily: "IBM Plex Mono,monospace" }} />
+                </div>
+              </div>
+              <div style={{ marginBottom: 14 }}>
+                <label style={{ display: "block", fontSize: 12.5, color: T.inkSoft, marginBottom: 6 }}>Padre</label>
+                <div style={{ display: "flex", gap: 8 }}>
+                  {[["iatf", "Inseminación"], ["servicio", "Servicio colectivo"]].map(([v, l]) => (
+                    <button key={v} onClick={() => setPadre(v)} style={{ flex: 1, padding: "12px 8px", borderRadius: 7, border: `1.5px solid ${T.line}`, background: padre === v ? T.pasture : "#fff", color: padre === v ? "#fff" : T.inkSoft, fontWeight: 600, fontSize: 14, cursor: "pointer" }}>{l}</button>
+                  ))}
+                </div>
+              </div>
+              {padre === "iatf" && (
+                <div style={{ marginBottom: 14 }}>
+                  <label style={{ display: "block", fontSize: 12.5, color: T.inkSoft, marginBottom: 6 }}>Toro / RP del padre (opcional)</label>
+                  <input value={toro} onChange={(e) => setToro(e.target.value)} style={{ width: "100%", minWidth: 0, boxSizing: "border-box", border: `1px solid ${T.line}`, background: "#fff", borderRadius: 7, padding: "11px 12px", fontSize: 16 }} />
+                </div>
+              )}
+              {editandoId && (
+                <button onClick={resetForm} style={{ width: "100%", minWidth: 0, background: "none", border: `1.5px solid ${T.line}`, color: T.inkSoft, borderRadius: 7, padding: 11, fontWeight: 600, fontSize: 13.5, cursor: "pointer" }}>
+                  Cancelar edición
+                </button>
+              )}
+            </div>
+
+            <div style={{ background: T.card, border: `1px solid ${T.line}`, borderRadius: 10, padding: 16 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+                <h2 style={{ margin: 0, fontSize: 15, color: T.pastureDk, fontFamily: "Space Grotesk,sans-serif" }}>Registros del campo</h2>
+                <button onClick={exportarCSV} style={{ background: "none", border: `1px solid ${T.line}`, color: T.inkSoft, fontSize: 12.5, padding: "6px 10px", borderRadius: 6, cursor: "pointer" }}>Exportar CSV</button>
+              </div>
+              {ordenados.length === 0 && <div style={{ color: T.inkSoft, fontSize: 13.5, textAlign: "center", padding: "18px 0" }}>Todavía no hay nacimientos cargados en {campo}.</div>}
+              {ordenados.map((r) => (
+                <div key={r.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 4px", borderBottom: `1px solid ${T.line}` }}>
+                  <div style={{ width: 8, height: 8, borderRadius: "50%", background: r.estado === "muerto" ? T.soil : T.ok, flexShrink: 0 }} />
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontFamily: "IBM Plex Mono,monospace", fontWeight: 600, fontSize: 14.5 }}>RP {r.rpTernero || "s/n"} · madre {r.rpMadre || "s/n"}</div>
+                    <div style={{ fontSize: 12, color: T.inkSoft, marginTop: 2 }}>
+                      {r.fecha} · {r.sexo === "M" ? "macho" : "hembra"} · {r.estado}{r.peso ? ` · ${r.peso} kg` : ""} · {r.padre === "iatf" ? `IATF${r.toro ? ` (${r.toro})` : ""}` : "servicio colectivo"}{r.cargadoPor ? ` · ${r.cargadoPor}` : ""}
+                    </div>
+                  </div>
+                  <button onClick={() => cargarParaEditar(r)} style={{ background: "none", border: "none", color: T.pasture, fontSize: 16, cursor: "pointer", padding: "4px 6px" }}>✎</button>
+                  <button onClick={() => borrar(r.id)} style={{ background: "none", border: "none", color: T.soil, fontSize: 18, cursor: "pointer", padding: "4px 6px" }}>✕</button>
+                </div>
+              ))}
+            </div>
+          </main>
+
+          <div style={{ position: "fixed", bottom: 0, left: 0, right: 0, background: T.paper, borderTop: `1px solid ${T.line}`, padding: "12px 16px calc(12px + env(safe-area-inset-bottom))" }}>
+            <div style={{ maxWidth: 480, margin: "0 auto" }}>
+              <button onClick={guardar} disabled={guardando} style={{ width: "100%", minWidth: 0, padding: 14, border: "none", borderRadius: 8, background: T.pasture, color: "#fff", fontSize: 15.5, fontWeight: 600, cursor: "pointer", opacity: guardando ? 0.6 : 1 }}>
+                {guardadoOk ? (editandoId ? "Actualizado ✓" : "Guardado ✓") : guardando ? "Guardando…" : (editandoId ? "Actualizar nacimiento" : "Guardar nacimiento")}
+              </button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    const root = createRoot(document.getElementById("root"));
+    root.render(<App />);
+  </script>
+</body>
+</html>
