@@ -1,1 +1,76 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Test Diagnóstico</title>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin="anonymous"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js" crossorigin="anonymous"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js" crossorigin="anonymous"></script>
+</head>
+<body style="font-family: sans-serif; padding: 24px; font-size: 16px; line-height: 1.6;">
+  <div id="log"></div>
+  <script>
+    function linea(txt, ok) {
+      var d = document.createElement("div");
+      d.style.padding = "8px 12px";
+      d.style.marginBottom = "6px";
+      d.style.borderRadius = "8px";
+      d.style.background = ok ? "#d7f0d7" : "#f8d7d7";
+      d.style.whiteSpace = "pre-wrap";
+      d.textContent = txt;
+      document.getElementById("log").appendChild(d);
+    }
 
+    // Paso 1: React/ReactDOM globals
+    try {
+      if (typeof React === "undefined" || typeof ReactDOM === "undefined") throw new Error("React o ReactDOM no están definidos");
+      linea("1. React y ReactDOM: OK", true);
+    } catch (e) {
+      linea("1. React/ReactDOM FALLÓ: " + ((e && (e.stack || e.message)) || String(e)), false);
+    }
+
+    // Paso 2: Babel transform + eval de JSX simple
+    var out = null;
+    try {
+      if (typeof Babel === "undefined") throw new Error("Babel no está definido");
+      out = Babel.transform(
+        'const { useState } = React; function Comp(){ return React.createElement("span", null, "hola jsx"); } window.__testComp = Comp;',
+        { presets: [["react", { runtime: "classic" }]], filename: "t.jsx" }
+      ).code;
+      (0, eval)(out);
+      if (typeof window.__testComp !== "function") throw new Error("El componente no quedó definido tras el eval");
+      linea("2. Babel.transform + eval: OK", true);
+    } catch (e) {
+      linea("2. Babel/eval FALLÓ: " + ((e && (e.stack || e.message)) || String(e)), false);
+    }
+
+    // Paso 3: Firebase init
+    try {
+      if (typeof firebase === "undefined") throw new Error("firebase no está definido (los scripts de gstatic no cargaron)");
+      var firebaseConfig = {
+        apiKey: "AIzaSyDeBLhH4lIASyLxlMg_oSwM_EZX7wzOg94",
+        authDomain: "reprobovina-tyg.firebaseapp.com",
+        projectId: "reprobovina-tyg",
+        storageBucket: "reprobovina-tyg.firebasestorage.app",
+        messagingSenderId: "162502425864",
+        appId: "1:162502425864:web:49fecac926675a731c00bd",
+      };
+      firebase.initializeApp(firebaseConfig);
+      var db = firebase.firestore();
+      linea("3. firebase.initializeApp + firestore(): OK", true);
+
+      // Paso 4: una llamada real a Firestore (async)
+      db.collection("partos_config").limit(1).get().then(function (snap) {
+        linea("4. Lectura real a Firestore: OK (documentos: " + snap.size + ")", true);
+      }).catch(function (err) {
+        linea("4. Lectura a Firestore FALLÓ: " + ((err && (err.stack || err.message)) || String(err)), false);
+      });
+    } catch (e) {
+      linea("3. Firebase init FALLÓ: " + ((e && (e.stack || e.message)) || String(e)), false);
+    }
+  </script>
+</body>
+</html>
